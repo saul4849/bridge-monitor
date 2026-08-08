@@ -1,0 +1,30 @@
+# Qt
+*.pro.user
+*.pro.user.*
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+Makefile*
+*build-*
+
+# C++ 编译产物
+*.o
+*.so
+*.a
+*.dll
+*.exe
+build/
+debug/
+release/
+
+# IDE
+.vscode/
+.idea/
+
+# 数据/日志
+*.csv
+
+# 系统文件
+.DS_Store
+Thumbs.db
