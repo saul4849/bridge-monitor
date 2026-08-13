@@ -372,7 +372,7 @@ void VideoWidget::captureFrame() {
                     double down  = result.at<float>(my + 1, mx);
                     double denom = 2.0 * (2.0 * center - up - down);
                     if (std::abs(denom) > 1e-6) {
-                        subPixelY = (up - down) / denom;
+                        subPixelY = (down - up) / denom;
                     }
                 }
                 t.currCenter = cv::Point2f(
