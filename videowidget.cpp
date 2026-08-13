@@ -362,7 +362,7 @@ void VideoWidget::captureFrame() {
                     double right = result.at<float>(my, mx + 1);
                     double denom = 2.0 * (2.0 * center - left - right);
                     if (std::abs(denom) > 1e-6) {
-                        subPixelX = (left - right) / denom;
+                        subPixelX = (right - left) / denom;
                     }
                 }
                 // Y方向抛物线插值：需要上下邻居都在范围内
