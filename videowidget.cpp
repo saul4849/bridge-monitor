@@ -172,6 +172,14 @@ void VideoWidget::openCamera() {
         closeCamera();
         return;
     }
+    
+    if (!m_calibManager.loadFromFile()) {
+            qDebug() << "[VideoWidget] No calibration file, using default pixel scale";
+    } else {
+        qDebug() << "[VideoWidget] Calibration loaded. Scale:" << m_calibManager.getPixelScale()
+                 << "Focal:" << m_calibManager.getCameraMatrix().at<double>(0,0);
+    }
+    
     timer->start(33);
     setText("Camera Running");
     qDebug() << "camera started";
@@ -225,9 +233,12 @@ void VideoWidget::resetZero() {
             t.refCenter = t.currCenter;
             t.dx = 0;
             t.dy = 0;
+            m_kalmanTracker.reset(t.id);
+            m_consecutiveFrames[t.id] = 0;
         }
     }
-    qDebug() << "zero reset";
+    m_statusAnalyzer.resetHistory();
+    qDebug() << "zero reset + kalman reset";
 }
 
 void VideoWidget::updateAllReferenceImages() {
@@ -293,7 +304,15 @@ void VideoWidget::mouseReleaseEvent(QMouseEvent *event) {
                 if (cvRoi.width > 0 && cvRoi.height > 0) {
                     t.templateImg = m_currentFrame(cvRoi).clone();
                     t.refCenter = cv::Point2f(roi.x() + roi.width() / 2.0, roi.y() + roi.height() / 2.0);
-                    t.mmPerPixel = 0.05;
+                    // 同步标定参数
+                    if (m_calibManager.isCalibrated()) {
+                        t.mmPerPixel = m_calibManager.getPixelScale();
+                        t.calibStatus = "已标定";
+                    } else {
+                        t.mmPerPixel = 0.05;
+                        t.calibStatus = "未标定";
+                    }
+                    
                     t.createTime = QDateTime::currentDateTime().toString("yyyy/M/d");
                     t.updateTime = t.createTime;
                     m_targets.append(t);
@@ -351,11 +370,9 @@ void VideoWidget::captureFrame() {
 
             if (maxVal > 0.55) {
                 t.confidence = maxVal * 100.0;
-
-                // ========== 亚像素插值（抛物线拟合）==========
+                // ========== 1. 亚像素插值==========
                 double subPixelX = 0.0, subPixelY = 0.0;
                 int mx = maxLoc.x, my = maxLoc.y;
-                // X方向抛物线插值：需要左右邻居都在范围内
                 if (mx > 0 && mx < result.cols - 1) {
                     double left  = result.at<float>(my, mx - 1);
                     double center = result.at<float>(my, mx);
@@ -365,7 +382,6 @@ void VideoWidget::captureFrame() {
                         subPixelX = (right - left) / denom;
                     }
                 }
-                // Y方向抛物线插值：需要上下邻居都在范围内
                 if (my > 0 && my < result.rows - 1) {
                     double up = result.at<float>(my - 1, mx);
                     double center = result.at<float>(my, mx);
@@ -375,22 +391,43 @@ void VideoWidget::captureFrame() {
                         subPixelY = (down - up) / denom;
                     }
                 }
-                t.currCenter = cv::Point2f(
+
+                // ========== 2. 原始测量中心 ==========
+                cv::Point2f measuredCenter(
                             searchRect.x + maxLoc.x + subPixelX + tmpl.cols / 2.0f,
                             searchRect.y + maxLoc.y + subPixelY + tmpl.rows / 2.0f
-                );
-                t.dx = (t.currCenter.x - t.refCenter.x) * t.mmPerPixel;
-                t.dy = (t.currCenter.y - t.refCenter.y) * t.mmPerPixel;
+                            );
 
+                // ========== 3. Kalman 滤波平滑 ==========
+                cv::Point2f filteredCenter = m_kalmanTracker.update(t.id, measuredCenter);
+                t.currCenter = filteredCenter;
+
+                // ========== 4. 使用标定参数计算物理位移 ==========
+                double dxPixel = t.currCenter.x - t.refCenter.x;
+                double dyPixel = t.currCenter.y - t.refCenter.y;
+
+                if (m_calibManager.isCalibrated() && m_calibManager.getCameraMatrix().at<double>(0,0) > 0) {
+                    t.dx = m_calibManager.pixelToMM(dxPixel, m_targetDistance);
+                    t.dy = m_calibManager.pixelToMM(dyPixel, m_targetDistance);
+                    t.calibStatus = "已标定";
+                } else {
+                    t.dx = dxPixel * t.mmPerPixel;
+                    t.dy = dyPixel * t.mmPerPixel;
+                    t.calibStatus = "未标定";
+                }
+
+                t.distance = m_targetDistance;
+
+                // ========== 5. 更新 ROI 位置（用于下一帧搜索）==========
                 t.roi = QRect(
-                    int(t.currCenter.x - t.roi.width() / 2.0),
-                    int(t.currCenter.y - t.roi.height() / 2.0),
-                    t.roi.width(),
-                    t.roi.height()
-                );
+                            int(t.currCenter.x - t.roi.width() / 2.0),
+                            int(t.currCenter.y - t.roi.height() / 2.0),
+                            t.roi.width(),
+                            t.roi.height()
+                            );
                 t.updateTime = QDateTime::currentDateTime().toString("yyyy/M/d");
 
-                
+                // ========== 6. 计算亮度与 SSIM ==========
                 cv::Rect currRoi(t.roi.x(), t.roi.y(), t.roi.width(), t.roi.height());
                 currRoi &= cv::Rect(0, 0, rgb.cols, rgb.rows);
                 if (currRoi.width > 0 && currRoi.height > 0) {
@@ -398,27 +435,22 @@ void VideoWidget::captureFrame() {
                     t.brightness = calculateBrightness(currROI);
                     t.ssim = calculateSSIM(t.templateImg, currROI);
                 }
-                // 距离：基于像素尺寸和焦距估算
-                t.distance = 1000.0; // 默认1m，实际应根据标定参数
 
-                // 状态判断
-                if (t.confidence >= 90) {
-                    t.status = "正常";
-                    t.statusColor = "#2ecc71";
-                } else if (t.confidence >= 70) {
-                    t.status = "警告";
-                    t.statusColor = "#f1c40f";
-                } else {
-                    t.status = "异常";
-                    t.statusColor = "#e74c3c";
-                }
+                // ========== 7. 状态分析==========
+                m_statusAnalyzer.updateHistory(t.confidence, t.brightness, t.ssim);
+                int frames = m_consecutiveFrames.value(t.id, 0);
+                m_consecutiveFrames[t.id] = frames + 1;
 
-                emit targetUpdated(i, t.dx, t.dy, t.confidence,
-                                   t.brightness, t.ssim, t.distance, t.status);
+                StatusResult sr = m_statusAnalyzer.analyze(t.confidence, t.brightness, t.ssim, t.dx, t.dy, frames);
+                t.status = sr.statusText;
+                t.statusColor = sr.statusColor;
+                emit targetUpdated(i, t.dx, t.dy, t.confidence,t.brightness, t.ssim, t.distance, t.status);
             } else {
+                // 匹配失败
                 t.confidence = 0;
                 t.status = "异常";
                 t.statusColor = "#e74c3c";
+                m_consecutiveFrames[t.id] = 0;
                 emit targetUpdated(i, 0, 0, 0, 0, 0, 0, "异常");
             }
         }
@@ -517,3 +549,26 @@ void VideoWidget::captureFrame() {
         m_csvStream->flush();
     }
 }
+
+double VideoWidget::pixelsToMM(double pixelDelta, int targetIndex) const
+{
+    if (targetIndex < 0 || targetIndex >= m_targets.size()) return pixelDelta * 0.05;
+    const Target& t = m_targets[targetIndex];
+
+    if (m_calibManager.isCalibrated() && m_calibManager.getCameraMatrix().at<double>(0,0) > 0) {
+        return m_calibManager.pixelToMM(pixelDelta, m_targetDistance);
+    }
+    return pixelDelta * t.mmPerPixel;
+}
+
+
+
+
+
+
+
+
+
+
+
+

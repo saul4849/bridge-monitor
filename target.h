@@ -16,15 +16,15 @@ struct Target {
     double dy = 0.0;        // Y方向位移 mm
     double confidence = 0.0;
     bool active = true;
-    double mmPerPixel = 0.05; // mm/像素
+    double mmPerPixel = 0.05; // 保留默认值，运行时会由 CalibrationManager 覆盖
     QString targetType = "参考靶标";
     QString createTime;
     QString updateTime;
     bool isRefCenter = false;
     QString calibStatus = "未校准";
 
-    //实时监测数据
-    double brightness = 1.0;    // 亮度比 (默认1.0)
+    // 实时监测数据
+    double brightness = 1.0;    // 亮度比
     double ssim = 0.0;          // 结构相似度
     double distance = 0.0;      // 靶标到相机距离 (mm)
     QString status = "正常";    // 状态文字
