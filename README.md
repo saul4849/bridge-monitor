@@ -105,7 +105,7 @@ make -j$(nproc)
 | `target.h` | 靶标数据结构（ROI、模板图、位移、像素比、标定状态等） |
 | `mainwindow.cpp/h/ui` | 主界面布局、页面切换、信号连接 |
 | `calibrationmanager.cpp/h` | 相机标定管理（张正友标定、YAML 读写、去畸变、像素尺度转换） |
-| `相机标定管理（张正友标定、YAML 读写、去畸变、像素尺度转换）` | Kalman 滤波位移平滑（4 状态 2 测量，按靶标 ID 独立跟踪） |
+| `kalmantracker.cpp/h` | Kalman 滤波位移平滑（4 状态 2 测量，按靶标 ID 独立跟踪） |
 | `statusanalyzer.cpp/h` | 在线质量评估与分级状态预警 |
 | `camera.yaml` | 标定参数文件（相机内参、畸变系数、像素尺度） |
 | `style.qss` | 深色工业主题样式表 |
