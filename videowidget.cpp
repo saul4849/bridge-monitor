@@ -172,14 +172,14 @@ void VideoWidget::openCamera() {
         closeCamera();
         return;
     }
-    
+    // ========== 新增：加载相机标定参数 ==========
     if (!m_calibManager.loadFromFile()) {
             qDebug() << "[VideoWidget] No calibration file, using default pixel scale";
     } else {
         qDebug() << "[VideoWidget] Calibration loaded. Scale:" << m_calibManager.getPixelScale()
                  << "Focal:" << m_calibManager.getCameraMatrix().at<double>(0,0);
     }
-    
+    // ==========================================
     timer->start(33);
     setText("Camera Running");
     qDebug() << "camera started";
@@ -233,7 +233,7 @@ void VideoWidget::resetZero() {
             t.refCenter = t.currCenter;
             t.dx = 0;
             t.dy = 0;
-            m_kalmanTracker.reset(t.id);
+            m_slidingAverage.reset(t.id);
             m_consecutiveFrames[t.id] = 0;
         }
     }
@@ -304,7 +304,7 @@ void VideoWidget::mouseReleaseEvent(QMouseEvent *event) {
                 if (cvRoi.width > 0 && cvRoi.height > 0) {
                     t.templateImg = m_currentFrame(cvRoi).clone();
                     t.refCenter = cv::Point2f(roi.x() + roi.width() / 2.0, roi.y() + roi.height() / 2.0);
-                    // 同步标定参数
+                    // ========== 新增：同步标定参数 ==========
                     if (m_calibManager.isCalibrated()) {
                         t.mmPerPixel = m_calibManager.getPixelScale();
                         t.calibStatus = "已标定";
@@ -312,7 +312,7 @@ void VideoWidget::mouseReleaseEvent(QMouseEvent *event) {
                         t.mmPerPixel = 0.05;
                         t.calibStatus = "未标定";
                     }
-                    
+                    // =====================================
                     t.createTime = QDateTime::currentDateTime().toString("yyyy/M/d");
                     t.updateTime = t.createTime;
                     m_targets.append(t);
@@ -370,7 +370,7 @@ void VideoWidget::captureFrame() {
 
             if (maxVal > 0.55) {
                 t.confidence = maxVal * 100.0;
-                // ========== 1. 亚像素插值==========
+                // ========== 1. 亚像素插值（保留原逻辑）==========
                 double subPixelX = 0.0, subPixelY = 0.0;
                 int mx = maxLoc.x, my = maxLoc.y;
                 if (mx > 0 && mx < result.cols - 1) {
@@ -398,8 +398,8 @@ void VideoWidget::captureFrame() {
                             searchRect.y + maxLoc.y + subPixelY + tmpl.rows / 2.0f
                             );
 
-                // ========== 3. Kalman 滤波平滑 ==========
-                cv::Point2f filteredCenter = m_kalmanTracker.update(t.id, measuredCenter);
+                // ========== 3. 滑动平均滤波平滑 ==========
+                cv::Point2f filteredCenter = m_slidingAverage.update(t.id, measuredCenter);
                 t.currCenter = filteredCenter;
 
                 // ========== 4. 使用标定参数计算物理位移 ==========
@@ -436,7 +436,7 @@ void VideoWidget::captureFrame() {
                     t.ssim = calculateSSIM(t.templateImg, currROI);
                 }
 
-                // ========== 7. 状态分析==========
+                // ========== 7. 状态分析（替代原来的简单 if-else）==========
                 m_statusAnalyzer.updateHistory(t.confidence, t.brightness, t.ssim);
                 int frames = m_consecutiveFrames.value(t.id, 0);
                 m_consecutiveFrames[t.id] = frames + 1;

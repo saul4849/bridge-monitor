@@ -33,15 +33,21 @@ LIBS += -L$$OPENCV_LIB \
 # PKGCONFIG += opencv4
 
 SOURCES += \
+    calibrationmanager.cpp \
     main.cpp \
     mainwindow.cpp \
     plotwidget.cpp \
+    slidingaverage.cpp \
+    statusanalyzer.cpp \
     targetmanager.cpp \
     videowidget.cpp
 
 HEADERS += \
+    calibrationmanager.h \
     mainwindow.h \
     plotwidget.h \
+    slidingaverage.h \
+    statusanalyzer.h \
     target.h \
     targetmanager.h \
     videowidget.h

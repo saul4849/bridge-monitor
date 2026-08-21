@@ -17,7 +17,7 @@
 #include <QMap>
 #include "target.h"
 #include "calibrationmanager.h"
-#include "kalmantracker.h"
+#include "slidingaverage.h"
 #include "statusanalyzer.h"
 
 
@@ -84,7 +84,7 @@ private:
 
     
     CalibrationManager m_calibManager;
-    KalmanTracker m_kalmanTracker;
+    SlidingAverage m_slidingAverage;
     StatusAnalyzer m_statusAnalyzer;
     double m_targetDistance = 1000.0;   // 靶标到相机距离(mm)
     QMap<QString, int> m_consecutiveFrames; // 连续检测帧计数（用targetId做key）

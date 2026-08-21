@@ -1,15 +1,16 @@
-#ifndef KALMANTRACKER_H
-#define KALMANTRACKER_H
+#ifndef SLIDINGAVERAGE_H
+#define SLIDINGAVERAGE_H
 
-#include <opencv2/video/tracking.hpp>
 #include <QMap>
+#include <QVector>
 #include <QString>
+#include <opencv2/core.hpp>
 
-class KalmanTracker
+class SlidingAverage
 {
 public:
-    KalmanTracker();
-    ~KalmanTracker();
+    explicit SlidingAverage(int windowSize = 5);
+    ~SlidingAverage();
 
     void init(const QString& targetId, const cv::Point2f& initialPos);
     void reset(const QString& targetId);
@@ -19,13 +20,12 @@ public:
 
 private:
     struct TrackerState {
-        cv::KalmanFilter kf;
+        QVector<cv::Point2f> history;
         bool initialized;
         cv::Point2f lastMeasurement;
     };
-
     QMap<QString, TrackerState> m_trackers;
-    void setupKalmanFilter(cv::KalmanFilter& kf, const cv::Point2f& initPos);
+    int m_windowSize;
 };
 
-#endif // KALMANTRACKER_H
+#endif // SLIDINGAVERAGE_H
