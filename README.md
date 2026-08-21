@@ -40,7 +40,7 @@
 [工业相机] --V4L2/MMAP--> [VideoWidget]
 |
 |--[CalibrationManager]--> camera.yaml (标定参数)
-|--[KalmanTracker]---------> 位移平滑
+|--[SlidingAverage]---------> 位移平滑
 |--[StatusAnalyzer]--------> 状态预警
 |
 [TargetManager] <---> [MainWindow]
@@ -54,7 +54,7 @@
 - **V4L2 高效采集**：使用 4 缓冲队列 + `mmap` 零拷贝，避免 `read()` 额外内存拷贝；NV12 通过 OpenCV 转 RGB 后渲染
 - **ROI 交互设计**：基于 `eventFilter` 拦截 `QLabel` 鼠标事件，实现图像坐标与控件坐标的双向映射，支持动态框选与实时回显
 - **模板匹配优化**：限定搜索区域为 ROI 邻域（±80px），避免全图遍历；匹配成功后自动更新 ROI 位置实现跟踪。搜索区域缩减约 1~2 个数量级（1920×1080 → 邻域窗口）
-- **亚像素插值**：基于抛物线拟合的亚像素定位，结合多帧滑动平均滤波（5 帧时序窗口，约 150 ms）抑制随机抖动，长期监测稳定性提升
+- **亚像素插值**：基于抛物线拟合的亚像素定位，结合多帧滑动平均滤波（5 帧时序窗口，约 150 ms）抑制随机抖动，长期监测稳定性提升（当前采用滑动平均抑制高频噪声，后续可扩展为自适应加权平均或卡尔曼滤波以支持动态振动分析）
 - **相机标定与尺度转换**：集成 `calibrationmanager`，支持 `findChessboardCorners` → `cornerSubPix` → `calibrateCamera` 标准流程，计算相机内参、畸变系数与像素尺度；运行时通过 `camera.yaml` 加载预标定参数，实现像素到毫米的自动转换，替代硬编码 `mmPerPixel`
 - **在线质量评估**：`StatusAnalyzer` 基于置信度、SSIM 结构相似度、ROI 亮度比及位移突变检测，实现模板漂移、光照异常、置信度下降的实时分级预警（正常/警告/异常）
 - **跨线程数据流**：视频采集/检测逻辑通过 Qt 信号槽（`targetUpdated`）与 UI 主线程解耦，避免界面卡顿
@@ -99,7 +99,7 @@ make -j$(nproc)
 
 | 文件目录 | 职责 |
 |------|------|
-| `videowidget.cpp/h` | V4L2 采集、OpenCV 模板匹配、ROI 交互、Kalman 滤波集成、CSV 导出 |
+| `videowidget.cpp/h` | V4L2 采集、OpenCV 模板匹配、ROI 交互、滑动平均滤波集成、CSV 导出 |
 | `plotwidget.cpp/h` | 实时位移曲线自绘控件（QPainter） |
 | `targetmanager.cpp/h` | 靶标列表管理、ROI 框选、配置导入导出 |
 | `target.h` | 靶标数据结构（ROI、模板图、位移、像素比、标定状态等） |
