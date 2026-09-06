@@ -26,22 +26,29 @@ OPENCV_LIB     = $$RK_SDK_PATH/opencv/opencv-linux-aarch64/lib
 INCLUDEPATH += $$OPENCV_INCLUDE
 LIBS += -L$$OPENCV_LIB \
         -lopencv_core \
-        -lopencv_imgproc
+        -lopencv_imgproc \
+        -lopencv_calib3d
 
 # 如果目标平台支持 pkg-config，可简化为：
 # CONFIG += link_pkgconfig
 # PKGCONFIG += opencv4
 
 SOURCES += \
+    calibrationmanager.cpp \
     main.cpp \
     mainwindow.cpp \
     plotwidget.cpp \
+    slidingaverage.cpp \
+    statusanalyzer.cpp \
     targetmanager.cpp \
     videowidget.cpp
 
 HEADERS += \
+    calibrationmanager.h \
     mainwindow.h \
     plotwidget.h \
+    slidingaverage.h \
+    statusanalyzer.h \
     target.h \
     targetmanager.h \
     videowidget.h

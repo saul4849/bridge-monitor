@@ -4,6 +4,7 @@
 #include <QDebug>
 #include <QInputDialog>
 #include <QPainter>
+#include <QSet>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -21,6 +22,7 @@ VideoWidget::VideoWidget(QWidget *parent) : QLabel(parent) {
     height = 1080;
     stride = 0;
     for (int i = 0; i < BUFFER_COUNT; i++) buffers[i] = nullptr;
+
     setText("Camera Offline");
     setAlignment(Qt::AlignCenter);
     timer = new QTimer(this);
@@ -60,48 +62,38 @@ double VideoWidget::calculateBrightness(const cv::Mat& roi) {
 double VideoWidget::calculateSSIM(const cv::Mat& img1, const cv::Mat& img2) {
     if (img1.empty() || img2.empty()) return 0;
     if (img1.size() != img2.size()) return 0;
-
     cv::Mat gray1, gray2;
     if (img1.channels() == 3) cv::cvtColor(img1, gray1, cv::COLOR_RGB2GRAY);
     else gray1 = img1;
     if (img2.channels() == 3) cv::cvtColor(img2, gray2, cv::COLOR_RGB2GRAY);
     else gray2 = img2;
-
     const double C1 = 6.5025, C2 = 58.5225;
     cv::Mat I1, I2;
     gray1.convertTo(I1, CV_64F);
     gray2.convertTo(I2, CV_64F);
-
     cv::Mat I1_2 = I1.mul(I1);
     cv::Mat I2_2 = I2.mul(I2);
     cv::Mat I1_I2 = I1.mul(I2);
-
     cv::Mat mu1, mu2;
     cv::GaussianBlur(I1, mu1, cv::Size(11, 11), 1.5);
     cv::GaussianBlur(I2, mu2, cv::Size(11, 11), 1.5);
-
     cv::Mat mu1_2 = mu1.mul(mu1);
     cv::Mat mu2_2 = mu2.mul(mu2);
     cv::Mat mu1_mu2 = mu1.mul(mu2);
-
     cv::Mat sigma1_2, sigma2_2, sigma12;
     cv::GaussianBlur(I1_2, sigma1_2, cv::Size(11, 11), 1.5);
     cv::GaussianBlur(I2_2, sigma2_2, cv::Size(11, 11), 1.5);
     cv::GaussianBlur(I1_I2, sigma12, cv::Size(11, 11), 1.5);
-
     sigma1_2 -= mu1_2;
     sigma2_2 -= mu2_2;
     sigma12 -= mu1_mu2;
-
     cv::Mat t1, t2, t3;
     t1 = 2 * mu1_mu2 + C1;
     t2 = 2 * sigma12 + C2;
     t3 = t1.mul(t2);
-
     t1 = mu1_2 + mu2_2 + C1;
     t2 = sigma1_2 + sigma2_2 + C2;
     t1 = t1.mul(t2);
-
     cv::Mat ssim_map;
     cv::divide(t3, t1, ssim_map);
     cv::Scalar mssim = cv::mean(ssim_map);
@@ -116,12 +108,14 @@ void VideoWidget::openCamera() {
         qDebug() << "open device failed:" << strerror(errno);
         return;
     }
+
     v4l2_format fmt{};
     fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     fmt.fmt.pix_mp.width = width;
     fmt.fmt.pix_mp.height = height;
     fmt.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12;
     fmt.fmt.pix_mp.num_planes = 1;
+
     if (!xioctl(VIDIOC_S_FMT, &fmt)) {
         qDebug() << "VIDIOC_S_FMT failed";
         closeCamera();
@@ -133,6 +127,7 @@ void VideoWidget::openCamera() {
     req.count = BUFFER_COUNT;
     req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     req.memory = V4L2_MEMORY_MMAP;
+
     if (!xioctl(VIDIOC_REQBUFS, &req)) {
         qDebug() << "REQBUFS failed";
         closeCamera();
@@ -147,18 +142,22 @@ void VideoWidget::openCamera() {
         buf.index = i;
         buf.length = 1;
         buf.m.planes = &plane;
+
         if (!xioctl(VIDIOC_QUERYBUF, &buf)) {
             qDebug() << "QUERYBUF failed";
             closeCamera();
             return;
         }
+
         bufferLength = buf.m.planes[0].length;
-        buffers[i] = mmap(NULL, bufferLength, PROT_READ | PROT_WRITE, MAP_SHARED, fd, buf.m.planes[0].m.mem_offset);
+        buffers[i] = mmap(NULL, bufferLength, PROT_READ | PROT_WRITE,
+                          MAP_SHARED, fd, buf.m.planes[0].m.mem_offset);
         if (buffers[i] == MAP_FAILED) {
             qDebug() << "mmap failed";
             closeCamera();
             return;
         }
+
         if (!xioctl(VIDIOC_QBUF, &buf)) {
             qDebug() << "QBUF failed";
             closeCamera();
@@ -172,6 +171,14 @@ void VideoWidget::openCamera() {
         closeCamera();
         return;
     }
+    // ========== 加载相机标定参数 ==========
+    if (!m_calibManager.loadFromFile()) {
+        qDebug() << "[VideoWidget] No calibration file, using default pixel scale";
+    } else {
+        qDebug() << "[VideoWidget] Calibration loaded. Scale:" << m_calibManager.getPixelScale()
+                 << "Focal:" << m_calibManager.getCameraMatrix().at<double>(0,0);
+    }
+    // ==========================================
     timer->start(33);
     setText("Camera Running");
     qDebug() << "camera started";
@@ -225,9 +232,12 @@ void VideoWidget::resetZero() {
             t.refCenter = t.currCenter;
             t.dx = 0;
             t.dy = 0;
+            m_slidingAverage.reset(t.id);
+            m_consecutiveFrames[t.id] = 0;
         }
     }
-    qDebug() << "zero reset";
+    m_statusAnalyzer.resetHistory();
+    qDebug() << "zero reset + history reset";
 }
 
 void VideoWidget::updateAllReferenceImages() {
@@ -243,6 +253,22 @@ void VideoWidget::updateAllReferenceImages() {
     }
     emit targetListChanged(m_targets);
     qDebug() << "reference images updated";
+}
+
+// 清理已删除靶标的历史记录，防止内存泄漏与 ID 复用污染
+void VideoWidget::setTargets(const QList<Target>& t) {
+    QSet<QString> oldIds;
+    for (const auto& ot : m_targets) oldIds.insert(ot.id);
+    QSet<QString> newIds;
+    for (const auto& nt : t) newIds.insert(nt.id);
+
+    for (const QString& id : oldIds - newIds) {
+        m_statusAnalyzer.removeTarget(id);
+        m_slidingAverage.removeTracker(id);
+        m_consecutiveFrames.remove(id);
+    }
+
+    m_targets = t;
 }
 
 QPoint VideoWidget::mapToImage(const QPoint& pos) const {
@@ -281,7 +307,8 @@ void VideoWidget::mouseReleaseEvent(QMouseEvent *event) {
         QRect roi = QRect(m_roiStart, m_roiEnd).normalized();
         if (roi.width() > 20 && roi.height() > 20 && !m_currentFrame.empty()) {
             bool ok;
-            QString name = QInputDialog::getText(this, "新建靶标", "靶标名称:", QLineEdit::Normal, QString("传感器%1").arg(m_targets.size()+1), &ok);
+            QString name = QInputDialog::getText(this, "新建靶标", "靶标名称:",
+                                                 QLineEdit::Normal, QString("传感器%1").arg(m_targets.size()+1), &ok);
             if (ok && !name.isEmpty()) {
                 Target t;
                 t.id = QString("MK_%1").arg(m_targets.size() + 1, 2, 10, QChar('0'));
@@ -293,7 +320,15 @@ void VideoWidget::mouseReleaseEvent(QMouseEvent *event) {
                 if (cvRoi.width > 0 && cvRoi.height > 0) {
                     t.templateImg = m_currentFrame(cvRoi).clone();
                     t.refCenter = cv::Point2f(roi.x() + roi.width() / 2.0, roi.y() + roi.height() / 2.0);
-                    t.mmPerPixel = 0.05;
+                    // ========== 同步标定参数 ==========
+                    if (m_calibManager.isCalibrated()) {
+                        t.mmPerPixel = m_calibManager.getPixelScale();
+                        t.calibStatus = "已标定";
+                    } else {
+                        t.mmPerPixel = 0.05;
+                        t.calibStatus = "未标定";
+                    }
+                    // =====================================
                     t.createTime = QDateTime::currentDateTime().toString("yyyy/M/d");
                     t.updateTime = t.createTime;
                     m_targets.append(t);
@@ -307,12 +342,14 @@ void VideoWidget::mouseReleaseEvent(QMouseEvent *event) {
 
 void VideoWidget::captureFrame() {
     if (fd < 0) return;
+
     v4l2_buffer buf{};
     v4l2_plane plane{};
     buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     buf.memory = V4L2_MEMORY_MMAP;
     buf.length = 1;
     buf.m.planes = &plane;
+
     if (!xioctl(VIDIOC_DQBUF, &buf)) return;
 
     uchar *data = static_cast<uchar*>(buffers[buf.index]);
@@ -327,6 +364,7 @@ void VideoWidget::captureFrame() {
     if (detecting && !m_targets.isEmpty()) {
         cv::Mat gray;
         cv::cvtColor(rgb, gray, cv::COLOR_RGB2GRAY);
+
         for (int i = 0; i < m_targets.size(); i++) {
             auto& t = m_targets[i];
             if (!t.active || t.templateImg.empty()) continue;
@@ -341,6 +379,7 @@ void VideoWidget::captureFrame() {
             cv::Mat searchImg = gray(searchRect);
             cv::Mat tmpl;
             cv::cvtColor(t.templateImg, tmpl, cv::COLOR_RGB2GRAY);
+
             if (searchImg.cols < tmpl.cols || searchImg.rows < tmpl.rows) continue;
 
             cv::Mat result;
@@ -352,36 +391,53 @@ void VideoWidget::captureFrame() {
             if (maxVal > 0.55) {
                 t.confidence = maxVal * 100.0;
 
-                // ========== 亚像素插值（抛物线拟合）==========
+                // ========== 1. 亚像素插值 ==========
                 double subPixelX = 0.0, subPixelY = 0.0;
                 int mx = maxLoc.x, my = maxLoc.y;
-                // X方向抛物线插值：需要左右邻居都在范围内
                 if (mx > 0 && mx < result.cols - 1) {
-                    double left  = result.at<float>(my, mx - 1);
+                    double left = result.at<float>(my, mx - 1);
                     double center = result.at<float>(my, mx);
                     double right = result.at<float>(my, mx + 1);
                     double denom = 2.0 * (2.0 * center - left - right);
                     if (std::abs(denom) > 1e-6) {
-                        subPixelX = (left - right) / denom;
+                        subPixelX = (right - left) / denom;
                     }
                 }
-                // Y方向抛物线插值：需要上下邻居都在范围内
                 if (my > 0 && my < result.rows - 1) {
                     double up = result.at<float>(my - 1, mx);
                     double center = result.at<float>(my, mx);
-                    double down  = result.at<float>(my + 1, mx);
+                    double down = result.at<float>(my + 1, mx);
                     double denom = 2.0 * (2.0 * center - up - down);
                     if (std::abs(denom) > 1e-6) {
-                        subPixelY = (up - down) / denom;
+                        subPixelY = (down - up) / denom;
                     }
                 }
-                t.currCenter = cv::Point2f(
-                            searchRect.x + maxLoc.x + subPixelX + tmpl.cols / 2.0f,
-                            searchRect.y + maxLoc.y + subPixelY + tmpl.rows / 2.0f
-                );
-                t.dx = (t.currCenter.x - t.refCenter.x) * t.mmPerPixel;
-                t.dy = (t.currCenter.y - t.refCenter.y) * t.mmPerPixel;
 
+                // ========== 2. 原始测量中心 ==========
+                cv::Point2f measuredCenter(
+                    searchRect.x + maxLoc.x + subPixelX + tmpl.cols / 2.0f,
+                    searchRect.y + maxLoc.y + subPixelY + tmpl.rows / 2.0f
+                );
+
+                // ========== 3. 滑动平均滤波平滑 ==========
+                cv::Point2f filteredCenter = m_slidingAverage.update(t.id, measuredCenter);
+                t.currCenter = filteredCenter;
+
+                // ========== 4. 使用标定参数计算物理位移 ==========
+                double dxPixel = t.currCenter.x - t.refCenter.x;
+                double dyPixel = t.currCenter.y - t.refCenter.y;
+                if (m_calibManager.isCalibrated() && m_calibManager.getCameraMatrix().at<double>(0,0) > 0) {
+                    t.dx = m_calibManager.pixelToMM(dxPixel, m_targetDistance);
+                    t.dy = m_calibManager.pixelToMM(dyPixel, m_targetDistance);
+                    t.calibStatus = "已标定";
+                } else {
+                    t.dx = dxPixel * t.mmPerPixel;
+                    t.dy = dyPixel * t.mmPerPixel;
+                    t.calibStatus = "未标定";
+                }
+                t.distance = m_targetDistance;
+
+                // ========== 5. 更新 ROI 位置（用于下一帧搜索）==========
                 t.roi = QRect(
                     int(t.currCenter.x - t.roi.width() / 2.0),
                     int(t.currCenter.y - t.roi.height() / 2.0),
@@ -390,7 +446,7 @@ void VideoWidget::captureFrame() {
                 );
                 t.updateTime = QDateTime::currentDateTime().toString("yyyy/M/d");
 
-                
+                // ========== 6. 计算亮度与 SSIM ==========
                 cv::Rect currRoi(t.roi.x(), t.roi.y(), t.roi.width(), t.roi.height());
                 currRoi &= cv::Rect(0, 0, rgb.cols, rgb.rows);
                 if (currRoi.width > 0 && currRoi.height > 0) {
@@ -398,63 +454,66 @@ void VideoWidget::captureFrame() {
                     t.brightness = calculateBrightness(currROI);
                     t.ssim = calculateSSIM(t.templateImg, currROI);
                 }
-                // 距离：基于像素尺寸和焦距估算
-                t.distance = 1000.0; // 默认1m，实际应根据标定参数
 
-                // 状态判断
-                if (t.confidence >= 90) {
-                    t.status = "正常";
-                    t.statusColor = "#2ecc71";
-                } else if (t.confidence >= 70) {
-                    t.status = "警告";
-                    t.statusColor = "#f1c40f";
-                } else {
-                    t.status = "异常";
-                    t.statusColor = "#e74c3c";
-                }
+                // ========== 7. 状态分析 ==========
+                int frames = m_consecutiveFrames.value(t.id, 0);
+                m_consecutiveFrames[t.id] = frames + 1;
+
+                StatusResult sr = m_statusAnalyzer.analyze(t.id, t.confidence, t.brightness,
+                                                           t.ssim, t.dx, t.dy, frames);
+                t.status = sr.statusText;
+                t.statusColor = sr.statusColor;
 
                 emit targetUpdated(i, t.dx, t.dy, t.confidence,
                                    t.brightness, t.ssim, t.distance, t.status);
+
             } else {
+                // 匹配失败
                 t.confidence = 0;
-                t.status = "异常";
-                t.statusColor = "#e74c3c";
-                emit targetUpdated(i, 0, 0, 0, 0, 0, 0, "异常");
+                m_consecutiveFrames[t.id] = 0;
+
+                StatusResult sr = m_statusAnalyzer.analyze(t.id, 0.0, 0.0, 0.0, 0.0, 0.0, 0);
+                t.status = sr.statusText;
+                t.statusColor = sr.statusColor;
+
+                emit targetUpdated(i, 0, 0, 0, 0, 0, 0, t.status);
             }
         }
     }
 
+    // 绘制靶标框与标签
     for (int i = 0; i < m_targets.size(); i++) {
         auto& t = m_targets[i];
         if (!t.active) continue;
         cv::Scalar color = (i == 0) ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 255, 255);
         cv::rectangle(display,
-            cv::Point(t.roi.x(), t.roi.y()),
-            cv::Point(t.roi.x() + t.roi.width(), t.roi.y() + t.roi.height()),
-            color, 2);
+                      cv::Point(t.roi.x(), t.roi.y()),
+                      cv::Point(t.roi.x() + t.roi.width(), t.roi.y() + t.roi.height()),
+                      color, 2);
         if (t.confidence > 0) {
-            cv::circle(display, cv::Point(t.currCenter.x, t.currCenter.y), 5, cv::Scalar(0, 0, 255), -1);
+            cv::circle(display, cv::Point(t.currCenter.x, t.currCenter.y), 5,
+                       cv::Scalar(0, 0, 255), -1);
         }
     }
 
     if (m_selecting) {
         QRect r = QRect(m_roiStart, m_roiEnd).normalized();
         cv::rectangle(display,
-            cv::Point(r.x(), r.y()),
-            cv::Point(r.x() + r.width(), r.y() + r.height()),
-            cv::Scalar(255, 0, 0), 2);
+                      cv::Point(r.x(), r.y()),
+                      cv::Point(r.x() + r.width(), r.y() + r.height()),
+                      cv::Scalar(255, 0, 0), 2);
     }
 
+    // 渲染到 QLabel
     QSize labelSize = size();
     QPixmap finalPixmap(labelSize);
     finalPixmap.fill(Qt::black);
-
     QPainter painter(&finalPixmap);
     painter.setRenderHint(QPainter::Antialiasing);
 
     QImage image(display.data, display.cols, display.rows, display.step, QImage::Format_RGB888);
-    QPixmap imgPixmap = QPixmap::fromImage(image).scaled(labelSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-
+    QPixmap imgPixmap = QPixmap::fromImage(image).scaled(labelSize,
+                                                         Qt::KeepAspectRatio, Qt::SmoothTransformation);
     int imgX = (labelSize.width() - imgPixmap.width()) / 2;
     int imgY = (labelSize.height() - imgPixmap.height()) / 2;
     painter.drawPixmap(imgX, imgY, imgPixmap);
@@ -482,38 +541,46 @@ void VideoWidget::captureFrame() {
 
         int textX = roiScreenX + (roiScreenW - textRect.width()) / 2;
         int textY = roiScreenY - textRect.height() - 1;
-
         if (textY < 2) textY = roiScreenY + 4;
         if (textX < 2) textX = 2;
         if (textX + textRect.width() > labelSize.width() - 2)
             textX = labelSize.width() - textRect.width() - 2;
 
         textRect.moveTo(textX, textY);
-
         painter.fillRect(textRect, QColor(0, 0, 0, 200));
         painter.setPen(QColor(0, 255, 255));
         painter.drawText(textRect, Qt::AlignCenter, txt);
     }
-
     painter.end();
     setPixmap(finalPixmap);
 
     xioctl(VIDIOC_QBUF, &buf);
 
+    // CSV 记录
     if (m_csvStream && detecting) {
         double elapsed = m_startTime.msecsTo(QDateTime::currentDateTime()) / 1000.0;
         for (int i = 0; i < m_targets.size(); i++) {
             auto& t = m_targets[i];
             if (!t.active) continue;
             *m_csvStream << QString("%1,%2,%3,%4,%5,%6,%7,%8,%9,%10\n")
-                .arg(elapsed, 0, 'f', 3).arg(t.id).arg(t.name)
-                .arg(t.dx, 0, 'f', 4).arg(t.dy, 0, 'f', 4)
-                .arg(t.confidence, 0, 'f', 2)
-                .arg(t.brightness, 0, 'f', 3)
-                .arg(t.ssim, 0, 'f', 3)
-                .arg(t.distance, 0, 'f', 1)
-                .arg(t.status);
+                                .arg(elapsed, 0, 'f', 3).arg(t.id).arg(t.name)
+                                .arg(t.dx, 0, 'f', 4).arg(t.dy, 0, 'f', 4)
+                                .arg(t.confidence, 0, 'f', 2)
+                                .arg(t.brightness, 0, 'f', 3)
+                                .arg(t.ssim, 0, 'f', 3)
+                                .arg(t.distance, 0, 'f', 1)
+                                .arg(t.status);
         }
         m_csvStream->flush();
     }
+}
+
+double VideoWidget::pixelsToMM(double pixelDelta, int targetIndex) const
+{
+    if (targetIndex < 0 || targetIndex >= m_targets.size()) return pixelDelta * 0.05;
+    const Target& t = m_targets[targetIndex];
+    if (m_calibManager.isCalibrated() && m_calibManager.getCameraMatrix().at<double>(0,0) > 0) {
+        return m_calibManager.pixelToMM(pixelDelta, m_targetDistance);
+    }
+    return pixelDelta * t.mmPerPixel;
 }
